@@ -1,0 +1,22 @@
+{
+  "name": "sorrycheck",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A public verdict registry for papers and repos claiming machine-checked proofs.",
+  "scripts": {
+    "dev": "pnpm --filter @sorrycheck/web dev",
+    "build": "pnpm run build:packages && pnpm --filter @sorrycheck/worker build && pnpm --filter @sorrycheck/web build",
+    "start": "pnpm --filter @sorrycheck/web start",
+    "worker": "pnpm --filter @sorrycheck/worker start",
+    "migrate": "pnpm --filter @sorrycheck/db build && pnpm --filter @sorrycheck/db migrate",
+    "test": "pnpm -r test",
+    "lint": "pnpm --filter @sorrycheck/web lint",
+    "build:packages": "pnpm --filter @sorrycheck/db --filter @sorrycheck/auth build",
+    "build:worker": "pnpm run build:packages && pnpm --filter @sorrycheck/worker build"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@9.12.0"
+}
