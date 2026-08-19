@@ -26,3 +26,4 @@ export function connect(url?: string, authToken?: string): Db {
 
 export * from './migrate.js';
 export * from './queries.js';
+export * from './registry.js';

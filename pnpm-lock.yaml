@@ -13,6 +13,9 @@ importers:
       '@simplewebauthn/browser':
         specifier: ^13.1.0
         version: 13.3.0
+      '@sorrycheck/analyzer':
+        specifier: workspace:*
+        version: link:../../packages/analyzer
       '@sorrycheck/auth':
         specifier: workspace:*
         version: link:../../packages/auth
@@ -68,9 +71,21 @@ importers:
 
   apps/worker:
     dependencies:
+      '@sorrycheck/analyzer':
+        specifier: workspace:*
+        version: link:../../packages/analyzer
       '@sorrycheck/db':
         specifier: workspace:*
         version: link:../../packages/db
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.20.1
+      typescript:
+        specifier: ^5.9.2
+        version: 5.9.3
+
+  packages/analyzer:
     devDependencies:
       '@types/node':
         specifier: ^22.10.2

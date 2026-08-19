@@ -1,8 +1,21 @@
 import { Hono } from 'hono';
 import { handle } from 'hono/vercel';
-import { connect, migrate } from '@sorrycheck/db';
+import {
+  connect,
+  countArtifacts,
+  coverageFor,
+  declarationsFor,
+  getArtifact,
+  insertArtifact,
+  latestCheck,
+  listArtifacts,
+  migrate,
+  slugify,
+} from '@sorrycheck/db';
+import { classifySource, parseSourceUrl } from '@sorrycheck/analyzer';
 import { issueLoginToken, magicLinkUrl, authenticationOptions } from '@sorrycheck/auth';
-import { siteUrl } from '@/lib/site';
+import { siteUrl, site } from '@/lib/site';
+import { STATIC_SCOPE_NOTE, verdictFor } from '@/lib/verdict';
 
 export const runtime = 'nodejs';
 
@@ -20,6 +33,251 @@ async function db() {
 
 app.get('/health', (c) => c.json({ ok: true, service: 'sorrycheck' }));
 
+/* ── registry ─────────────────────────────────────────────────────────────── */
+
+/**
+ * Every read path is unauthenticated. Accounts exist only to CLAIM an artifact
+ * you authored — reading the registry never requires one.
+ */
+app.get('/v1/artifacts', async (c) => {
+  const client = await db();
+  const query = c.req.query('q');
+  const limit = Number(c.req.query('limit') ?? 50);
+  const offset = Number(c.req.query('offset') ?? 0);
+
+  const rows = await listArtifacts(client, {
+    ...(query ? { query } : {}),
+    limit: Number.isFinite(limit) ? limit : 50,
+    offset: Number.isFinite(offset) ? offset : 0,
+    passingFirst: true,
+  });
+
+  return c.json({
+    note: STATIC_SCOPE_NOTE,
+    counts: await countArtifacts(client),
+    artifacts: rows.map((row) => ({
+      slug: row.slug,
+      title: row.title,
+      authors: row.authors,
+      paperUrl: row.paper_url,
+      sourceUrl: row.source_url,
+      sourceStatus: row.source_status,
+      system: row.system,
+      declarations: row.declarations_total,
+      sorryInSource: row.sorry_total,
+      lastCheckedAt: row.last_checked_at,
+      verdict: verdictFor(row, {
+        sorry_total: row.sorry_total ?? 0,
+        declarations_total: row.declarations_total ?? 0,
+        system: row.system,
+      } as never),
+      url: `${siteUrl()}/a/${row.slug}`,
+    })),
+  });
+});
+
+app.get('/v1/artifacts/:slug', async (c) => {
+  const client = await db();
+  const artifact = await getArtifact(client, c.req.param('slug'));
+  if (!artifact) return c.json({ error: 'not found' }, 404);
+
+  const check = await latestCheck(client, artifact.id);
+  const declarations = check ? await declarationsFor(client, check.id) : [];
+  const coverage = check ? await coverageFor(client, check.id) : null;
+
+  return c.json({
+    note: STATIC_SCOPE_NOTE,
+    slug: artifact.slug,
+    title: artifact.title,
+    authors: artifact.authors,
+    venue: artifact.venue,
+    paperUrl: artifact.paper_url,
+    sourceUrl: artifact.source_url,
+    sourceStatus: artifact.source_status,
+    authorNote: artifact.author_note,
+    lastCheckedAt: artifact.last_checked_at,
+    verdict: verdictFor(artifact, check),
+    check: check
+      ? {
+          kind: check.kind,
+          system: check.system,
+          commitSha: check.commit_sha,
+          declarationsTotal: check.declarations_total,
+          sorryTotal: check.sorry_total,
+          axiomsTotal: check.axioms_total,
+          filesScanned: check.files_scanned,
+          summary: check.summary,
+          checkedAt: check.checked_at,
+          // Explicitly null and explicitly explained: nothing was executed.
+          exitCode: null,
+          buildStatus: 'not-run',
+          buildNote:
+            'The build and `#print axioms` probe require a sandbox that runs untrusted code. It is not implemented, so no build result exists for this artifact.',
+        }
+      : null,
+    declarations: declarations.map((d) => ({
+      name: d.name,
+      kind: d.kind,
+      file: d.file,
+      line: d.line,
+      hasSorryInSource: Boolean(d.has_sorry),
+      isAxiom: Boolean(d.is_axiom),
+      // Null, not empty: the axiom probe did not run.
+      axioms: null,
+    })),
+    coverage: coverage
+      ? {
+          assertedCount: coverage.asserted_count,
+          matchedCount: coverage.matched_count,
+          methods: coverage.method ? coverage.method.split(',') : [],
+          note: 'An unmatched result means our matcher found no declaration for it. It does not mean the result is unproven.',
+          ...(coverage.detail ? (JSON.parse(coverage.detail) as object) : {}),
+        }
+      : null,
+  });
+});
+
+/** Submit an artifact, or attach a repository to one that exists. */
+app.post('/v1/submit', async (c) => {
+  let body: { title?: string; paperUrl?: string; sourceUrl?: string; authors?: string };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'body must be JSON' }, 400);
+  }
+
+  const title = body.title?.trim();
+  if (!title) return c.json({ error: 'title is required' }, 400);
+
+  if (body.sourceUrl && !parseSourceUrl(body.sourceUrl)) {
+    return c.json({ error: 'sourceUrl does not look like a source location' }, 400);
+  }
+
+  const client = await db();
+  const slug = slugify(title);
+
+  await insertArtifact(client, {
+    slug,
+    title,
+    authors: body.authors ?? '',
+    paperUrl: body.paperUrl ?? null,
+    sourceUrl: body.sourceUrl ?? null,
+    sourceStatus: classifySource(body.sourceUrl, true),
+    queueStatus: 'pending',
+  });
+
+  return c.json({ ok: true, slug, url: `${siteUrl()}/a/${slug}`, status: 'queued' });
+});
+
+/* ── MCP ──────────────────────────────────────────────────────────────────── */
+
+const MCP_TOOLS = [
+  {
+    name: 'get_artifact',
+    description:
+      'Verification status of one artifact in the sorrycheck registry: which declarations exist in the published formalization, which contain a placeholder token in source, and how many of the paper\'s asserted results were matched to a declaration. This is a static reading of source, NOT a build and NOT the `#print axioms` probe.',
+    inputSchema: {
+      type: 'object',
+      properties: { slug: { type: 'string', description: 'The artifact slug.' } },
+      required: ['slug'],
+    },
+  },
+  {
+    name: 'search_artifacts',
+    description: 'Search the sorrycheck registry by title, author or slug.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string' },
+        limit: { type: 'number', description: 'Default 20, max 200.' },
+      },
+    },
+  },
+];
+
+app.post('/mcp', async (c) => {
+  let message: { id?: unknown; method?: string; params?: Record<string, unknown> };
+  try {
+    message = await c.req.json();
+  } catch {
+    return c.json({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'parse error' } }, 400);
+  }
+
+  const id = message.id ?? null;
+  const reply = (result: unknown) => c.json({ jsonrpc: '2.0', id, result });
+  const fail = (code: number, msg: string) => c.json({ jsonrpc: '2.0', id, error: { code, message: msg } });
+
+  switch (message.method) {
+    case 'initialize':
+      return reply({
+        protocolVersion: '2024-11-05',
+        capabilities: { tools: {} },
+        serverInfo: { name: site.name, version: '0.1.0' },
+      });
+    case 'notifications/initialized':
+      return c.body(null, 204);
+    case 'tools/list':
+      return reply({ tools: MCP_TOOLS });
+    case 'tools/call': {
+      const params = (message.params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
+      const client = await db();
+
+      if (params.name === 'get_artifact') {
+        const slug = String(params.arguments?.['slug'] ?? '');
+        const artifact = await getArtifact(client, slug);
+        if (!artifact) {
+          return reply({ content: [{ type: 'text', text: `no artifact "${slug}"` }], isError: true });
+        }
+        const check = await latestCheck(client, artifact.id);
+        const payload = {
+          note: STATIC_SCOPE_NOTE,
+          slug: artifact.slug,
+          title: artifact.title,
+          sourceStatus: artifact.source_status,
+          verdict: verdictFor(artifact, check),
+          buildStatus: 'not-run',
+          check,
+        };
+        return reply({
+          content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
+          structuredContent: payload,
+        });
+      }
+
+      if (params.name === 'search_artifacts') {
+        const query = params.arguments?.['query'];
+        const rows = await listArtifacts(client, {
+          ...(query ? { query: String(query) } : {}),
+          limit: Math.min(Number(params.arguments?.['limit'] ?? 20), 200),
+          passingFirst: true,
+        });
+        const payload = {
+          note: STATIC_SCOPE_NOTE,
+          artifacts: rows.map((r) => ({
+            slug: r.slug,
+            title: r.title,
+            sourceStatus: r.source_status,
+            sorryInSource: r.sorry_total,
+            url: `${siteUrl()}/a/${r.slug}`,
+          })),
+        };
+        return reply({
+          content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
+          structuredContent: payload,
+        });
+      }
+
+      return fail(-32602, `unknown tool "${params.name}"`);
+    }
+    default:
+      return fail(-32601, `unknown method "${message.method}"`);
+  }
+});
+
+app.get('/mcp', (c) => c.json({ name: site.name, transport: 'streamable-http', tools: MCP_TOOLS }));
+
+/* ── auth ─────────────────────────────────────────────────────────────────── */
+
 /**
  * Request a sign-in link. Always answers ok:true — whether an address has an
  * account is not something this endpoint should leak, and rate limits report
@@ -34,15 +292,12 @@ app.post('/auth/magic', async (c) => {
 
   const key = process.env['RESEND_API_KEY'];
   if (!key) {
-    // No mail provider configured. Outside production, hand the link back in
-    // the response so local sign-in works; never do this in production, where
-    // it would let anyone sign in as any address.
     console.log('[auth] magic link for', email, link);
     if (process.env['NODE_ENV'] !== 'production') return c.json({ ok: true, devLink: link });
     return c.json({ ok: true });
   }
 
-  await fetch('https://api.resend.com/emails', {
+  const sent = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -52,6 +307,14 @@ app.post('/auth/magic', async (c) => {
       text: `Sign in: ${link}\n\nThis link expires in 15 minutes.`,
     }),
   });
+
+  // A failed send used to be swallowed: the endpoint returned ok:true whether or
+  // not the provider accepted it, so an unverified sending domain looked exactly
+  // like success. Still ok:true to the caller — leaking whether an address has an
+  // account is the reason it always answers ok — but no longer silent for us.
+  if (!sent.ok) {
+    console.error('[auth] resend rejected the send', sent.status, await sent.text().catch(() => ''));
+  }
 
   return c.json({ ok: true });
 });

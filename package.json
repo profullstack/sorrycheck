@@ -12,7 +12,7 @@
     "migrate": "pnpm --filter @sorrycheck/db build && pnpm --filter @sorrycheck/db migrate",
     "test": "pnpm -r test",
     "lint": "pnpm --filter @sorrycheck/web lint",
-    "build:packages": "pnpm --filter @sorrycheck/db --filter @sorrycheck/auth build",
+    "build:packages": "pnpm --filter @sorrycheck/db --filter @sorrycheck/auth --filter @sorrycheck/analyzer build",
     "build:worker": "pnpm run build:packages && pnpm --filter @sorrycheck/worker build"
   },
   "engines": {

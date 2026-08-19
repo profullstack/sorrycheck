@@ -1,0 +1,20 @@
+[
+  {
+    "title": "The Logic of AGI",
+    "authors": "Kocabay, Yalçın, Tugolbaev",
+    "paperUrl": "https://logic-of-agi.github.io/paper.pdf",
+    "sourceUrl": null
+  },
+  {
+    "title": "Mathlib4",
+    "authors": "The mathlib community",
+    "paperUrl": "https://leanprover-community.github.io/",
+    "sourceUrl": "https://github.com/leanprover-community/mathlib4"
+  },
+  {
+    "title": "PutnamBench",
+    "authors": "Tsoukalas et al.",
+    "paperUrl": "https://arxiv.org/abs/2407.11214",
+    "sourceUrl": "https://github.com/trishullab/PutnamBench"
+  }
+]

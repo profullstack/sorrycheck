@@ -22,11 +22,66 @@ sorrycheck reads artifacts that claim a machine-checked proof and publishes what
 ```
 apps/
   web/      Next.js app; Hono API at src/app/api/[[...route]]
-  worker/   background checker — resolves sources, builds formalizations in a sandbox and records verdicts
+  worker/   background checker — drains the queue, reads sources, records what it found
+            (also `import`, the bulk seed loader)
 packages/
-  db/       Turso client, queries and forward-only migrations
+  analyzer/ static analysis: declarations, placeholder tokens, coverage matching
+  db/       Turso client, registry queries and forward-only migrations
   auth/     magic link, passkey, session
+seed/       example seed file for the importer
 ```
+
+## What is measured, and what is not
+
+**Measured today**, from published source alone:
+
+- whether the formalization source is published at all, and reachable
+- which proof system the project uses (Lean 4, Coq, Isabelle)
+- which declarations exist, with file and line
+- which declarations contain a literal placeholder token — `sorry` in Lean and
+  Isabelle, `Admitted` in Coq
+- which declarations are introduced with `axiom`, and so assumed rather than proved
+- how many of the paper's numbered results matched a declaration, and by which method
+- how much of the project was actually read, when size caps truncated the scan
+
+**Not implemented:** the build and the axiom probe. `lake build` and
+`#print axioms` require a sandbox that executes untrusted third-party code with
+the network off, a hard timeout and a disposable filesystem. Until that exists,
+every check records `exit_code = NULL` and `buildStatus: "not-run"`.
+
+A null exit code means **not run**. It does not mean a project failed to build,
+and no read path may render it as one. The distinction is load-bearing: a file
+with zero `sorry` tokens can still depend on `sorryAx` through a declaration in
+another file, which only the axiom probe can see.
+
+## Fairness, in code
+
+The PRD's fairness policy is enforced in `apps/web/src/lib/verdict.ts`, which has
+no `fail` tone at all:
+
+- `not_published` is **neutral and grey**. It is a fixable fact about a link, not
+  a claim about anyone's honesty, and the page says how to fix it.
+- a placeholder in source is `attention`, not failure — work in progress
+  legitimately contains them.
+- anything unmeasured is `unknown`, never assumed.
+- an unmatched coverage result is reported as **unmatched, never as unproven**.
+  We cannot tell a result that was never formalized from one our matcher missed.
+- the listing leads with artifacts that check out clean, so the front page does
+  not open on failures.
+- an artifact page is `noindex` until its authors have been notified.
+
+## Running it
+
+```bash
+# seed the registry (writes rows directly; never through the HTTP submit path)
+pnpm --filter @sorrycheck/worker import seed/example.json
+
+# the checker drains the queue on its own interval
+WORKER_BATCH_SIZE=5 pnpm --filter @sorrycheck/worker start
+```
+
+Set `GITHUB_TOKEN` to raise the API rate limit. A scopeless token is enough — the
+checker only reads public repositories.
 
 ## Develop
 

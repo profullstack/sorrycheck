@@ -10,9 +10,10 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@simplewebauthn/browser": "^13.1.0",
+    "@sorrycheck/analyzer": "workspace:*",
     "@sorrycheck/auth": "workspace:*",
     "@sorrycheck/db": "workspace:*",
-    "@simplewebauthn/browser": "^13.1.0",
     "@swc/helpers": "^0.5.23",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

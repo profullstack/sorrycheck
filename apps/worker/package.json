@@ -6,9 +6,12 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "dev": "node dist/index.js"
+    "dev": "node dist/index.js",
+    "import": "node dist/import.js",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
+    "@sorrycheck/analyzer": "workspace:*",
     "@sorrycheck/db": "workspace:*"
   },
   "devDependencies": {
