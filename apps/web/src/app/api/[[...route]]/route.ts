@@ -4,16 +4,27 @@ import {
   connect,
   countArtifacts,
   coverageFor,
+  createClaim,
   declarationsFor,
   getArtifact,
+  getClaim,
   insertArtifact,
   latestCheck,
   listArtifacts,
   migrate,
+  requeue,
+  setAuthorNote,
+  setSourceUrl,
   slugify,
 } from '@sorrycheck/db';
 import { classifySource, parseSourceUrl } from '@sorrycheck/analyzer';
-import { issueLoginToken, magicLinkUrl, authenticationOptions } from '@sorrycheck/auth';
+import {
+  issueLoginToken,
+  magicLinkUrl,
+  authenticationOptions,
+  resolveSession,
+  SESSION_COOKIE,
+} from '@sorrycheck/auth';
 import { siteUrl, site } from '@/lib/site';
 import { STATIC_SCOPE_NOTE, verdictFor } from '@/lib/verdict';
 
@@ -167,6 +178,90 @@ app.post('/v1/submit', async (c) => {
   });
 
   return c.json({ ok: true, slug, url: `${siteUrl()}/a/${slug}`, status: 'queued' });
+});
+
+/* ── claims and corrections ───────────────────────────────────────────────── */
+
+/**
+ * These are the only authenticated routes in the product. Accounts exist to
+ * claim an artifact you authored and correct it — never to read the registry.
+ */
+async function currentUser(c: { req: { header: (name: string) => string | undefined } }) {
+  const cookie = c.req.header('cookie') ?? '';
+  const match = cookie.match(new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([^;]+)`));
+  return match?.[1] ? resolveSession(await db(), decodeURIComponent(match[1])) : null;
+}
+
+app.post('/v1/artifacts/:slug/claim', async (c) => {
+  const user = await currentUser(c);
+  if (!user) return c.json({ error: 'sign in to claim an artifact' }, 401);
+
+  const client = await db();
+  const artifact = await getArtifact(client, c.req.param('slug'));
+  if (!artifact) return c.json({ error: 'not found' }, 404);
+
+  await createClaim(client, artifact.id, user.id);
+  return c.json({
+    ok: true,
+    claimed: true,
+    verified: false,
+    note: 'A claim is recorded as an assertion, not a verification. It unlocks corrections; it does not transfer ownership of the page.',
+  });
+});
+
+app.post('/v1/artifacts/:slug/note', async (c) => {
+  const user = await currentUser(c);
+  if (!user) return c.json({ error: 'sign in to add a note' }, 401);
+
+  const client = await db();
+  const artifact = await getArtifact(client, c.req.param('slug'));
+  if (!artifact) return c.json({ error: 'not found' }, 404);
+  if (!(await getClaim(client, artifact.id, user.id))) {
+    return c.json({ error: 'claim this artifact first' }, 403);
+  }
+
+  const { note } = await c.req.json<{ note?: string }>();
+  if (typeof note !== 'string') return c.json({ error: 'note is required' }, 400);
+
+  await setAuthorNote(client, artifact.slug, note.slice(0, 4000));
+  return c.json({ ok: true });
+});
+
+/** Attach or correct the source repository, then queue a fresh check. */
+app.post('/v1/artifacts/:slug/source', async (c) => {
+  const user = await currentUser(c);
+  if (!user) return c.json({ error: 'sign in to correct an artifact' }, 401);
+
+  const client = await db();
+  const artifact = await getArtifact(client, c.req.param('slug'));
+  if (!artifact) return c.json({ error: 'not found' }, 404);
+  if (!(await getClaim(client, artifact.id, user.id))) {
+    return c.json({ error: 'claim this artifact first' }, 403);
+  }
+
+  const { sourceUrl } = await c.req.json<{ sourceUrl?: string }>();
+  if (!sourceUrl || !parseSourceUrl(sourceUrl)) {
+    return c.json({ error: 'sourceUrl does not look like a source location' }, 400);
+  }
+
+  await setSourceUrl(client, artifact.id, sourceUrl, classifySource(sourceUrl, true));
+  await requeue(client, artifact.id);
+  return c.json({ ok: true, status: 'queued', note: 'The artifact will be re-checked from scratch.' });
+});
+
+app.post('/v1/artifacts/:slug/recheck', async (c) => {
+  const user = await currentUser(c);
+  if (!user) return c.json({ error: 'sign in to request a re-check' }, 401);
+
+  const client = await db();
+  const artifact = await getArtifact(client, c.req.param('slug'));
+  if (!artifact) return c.json({ error: 'not found' }, 404);
+  if (!(await getClaim(client, artifact.id, user.id))) {
+    return c.json({ error: 'claim this artifact first' }, 403);
+  }
+
+  await requeue(client, artifact.id);
+  return c.json({ ok: true, status: 'queued' });
 });
 
 /* ── MCP ──────────────────────────────────────────────────────────────────── */

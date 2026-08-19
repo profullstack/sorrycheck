@@ -20,6 +20,31 @@ export class GithubError extends Error {
   }
 }
 
+/**
+ * Rate limiting is a normal operating condition, not a property of the artifact.
+ *
+ * It is a distinct type because the checker must leave the artifact `pending` and
+ * try again later. Treating it as a failure would mark a perfectly good
+ * repository `skipped` and never look at it again — and unauthenticated GitHub
+ * allows only 60 requests an hour, so that would silently discard most of a
+ * corpus on the first run.
+ */
+export class GithubRateLimited extends Error {
+  constructor(readonly retryAfterMs: number) {
+    super(`github rate limited, retry in ${Math.round(retryAfterMs / 1000)}s`);
+  }
+}
+
+function rateLimitedFrom(response: Response): GithubRateLimited | null {
+  if (response.status !== 403 && response.status !== 429) return null;
+  const remaining = response.headers.get('x-ratelimit-remaining');
+  const retryAfter = Number(response.headers.get('retry-after') ?? 0) * 1000;
+  const reset = Number(response.headers.get('x-ratelimit-reset') ?? 0) * 1000;
+  // A 403 without an exhausted budget is a real permission problem, not a limit.
+  if (remaining !== '0' && !retryAfter) return null;
+  return new GithubRateLimited(retryAfter || Math.max(reset - Date.now(), 0) || 60_000);
+}
+
 function headers(): Record<string, string> {
   const token = process.env['GITHUB_TOKEN'];
   return {
@@ -31,6 +56,8 @@ function headers(): Record<string, string> {
 
 async function json<T>(url: string): Promise<T> {
   const response = await fetch(url, { headers: headers() });
+  const limited = rateLimitedFrom(response);
+  if (limited) throw limited;
   if (!response.ok) {
     throw new GithubError(`${url} -> ${response.status}`, response.status);
   }

@@ -9,7 +9,7 @@ import {
   type Db,
 } from '@sorrycheck/db';
 import { analyzeStatic, detectSystem, parseSourceUrl, summarize } from '@sorrycheck/analyzer';
-import { fetchRepo, GithubError } from './github.js';
+import { fetchRepo, GithubError, GithubRateLimited } from './github.js';
 
 /**
  * The checker: drains the pending queue and records what a static pass can
@@ -119,6 +119,14 @@ async function tick(db: Db): Promise<void> {
     try {
       await check(db, artifact);
     } catch (err) {
+      // Rate limiting says nothing about the artifact. Leave it pending and stop
+      // the batch: marking it skipped would discard a perfectly good repository
+      // and never look at it again, and unauthenticated GitHub allows only 60
+      // requests an hour, so that would quietly throw away most of a corpus.
+      if (err instanceof GithubRateLimited) {
+        console.log(`[checker] ${err.message}; leaving ${artifact.slug} pending`);
+        return;
+      }
       // One bad repository must not stall the queue behind it.
       console.error(`[checker] ${artifact.slug} failed`, err);
       await markSkipped(db, artifact.id);

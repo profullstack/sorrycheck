@@ -8,7 +8,9 @@
     "start": "node dist/index.js",
     "dev": "node dist/index.js",
     "import": "node dist/import.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "crawl": "node dist/crawl.js",
+    "notify": "node dist/notify.js"
   },
   "dependencies": {
     "@sorrycheck/analyzer": "workspace:*",

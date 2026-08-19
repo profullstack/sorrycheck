@@ -310,3 +310,75 @@ export async function coverageFor(db: Db, checkId: number) {
 export async function setAuthorNote(db: Db, slug: string, note: string): Promise<void> {
   await db.execute({ sql: 'update artifacts set author_note = ? where slug = ?', args: [note, slug] });
 }
+
+export interface Claim {
+  id: number;
+  artifact_id: number;
+  user_id: number;
+  verified_at: number | null;
+  created_at: number;
+}
+
+/**
+ * Record a claim on an artifact.
+ *
+ * `verified_at` stays null: a claim is an assertion until a human checks it, and
+ * treating "claimed" as "verified" would let anyone take editorial control of a
+ * page about someone else's work. An unverified claim still unlocks corrections,
+ * because a wrong correction is visible and reversible while a stonewalled
+ * author is neither.
+ */
+export async function createClaim(db: Db, artifactId: number, userId: number, now = Date.now()): Promise<void> {
+  await db.execute({
+    sql: 'insert or ignore into claims (artifact_id, user_id, created_at) values (?, ?, ?)',
+    args: [artifactId, userId, now],
+  });
+  // coalesce so the first claimant stays recorded rather than being replaced.
+  await db.execute({
+    sql: 'update artifacts set claimed_by = coalesce(claimed_by, ?) where id = ?',
+    args: [userId, artifactId],
+  });
+}
+
+export async function getClaim(db: Db, artifactId: number, userId: number): Promise<Claim | null> {
+  const r = await db.execute({
+    sql: 'select * from claims where artifact_id = ? and user_id = ?',
+    args: [artifactId, userId],
+  });
+  return (r.rows[0] as unknown as Claim) ?? null;
+}
+
+/** Put an artifact back in the queue, e.g. after its source url was corrected. */
+export async function requeue(db: Db, artifactId: number): Promise<void> {
+  await db.execute({
+    sql: `update artifacts set queue_status = 'pending' where id = ?`,
+    args: [artifactId],
+  });
+}
+
+export async function setSourceUrl(
+  db: Db,
+  artifactId: number,
+  url: string,
+  status: SourceStatus,
+): Promise<void> {
+  await db.execute({
+    sql: 'update artifacts set source_url = ?, source_status = ? where id = ?',
+    args: [url, status, artifactId],
+  });
+}
+
+/**
+ * Stamp an artifact as notified, returning false if it already was.
+ *
+ * Until this is set the artifact page renders `noindex`. That is the "notify
+ * before publishing" rule enforced rather than merely intended: a page about
+ * someone's work should not be findable before they have been told it exists.
+ */
+export async function markNotified(db: Db, slug: string, now = Date.now()): Promise<boolean> {
+  const r = await db.execute({
+    sql: 'update artifacts set notified_at = ? where slug = ? and notified_at is null',
+    args: [now, slug],
+  });
+  return r.rowsAffected > 0;
+}
